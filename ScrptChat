@@ -1,0 +1,161 @@
+import pandas as pd
+import numpy as np
+from datetime import datetime
+
+# -----------------------------
+# 1. FILE PATHS
+# -----------------------------
+PAIRING_FILE = "DEL Start Pilot Pairing July25-Sept25.csv"
+HEADCOUNT_FILE = "Operating Pilot Headcount.csv"
+STANDBY_FILE = "Standby_activation_data_JulytoSept.csv"
+OUTPUT_FILE = "final_standby_conversion_output.csv"
+
+# -----------------------------
+# 2. HELPER FUNCTIONS (SAME AS NOTEBOOK)
+# -----------------------------
+def get_window(hour):
+    if 0 <= hour < 4:
+        return "00-04"
+    elif 4 <= hour < 8:
+        return "04-08"
+    elif 8 <= hour < 12:
+        return "08-12"
+    elif 12 <= hour < 16:
+        return "12-16"
+    elif 16 <= hour < 20:
+        return "16-20"
+    else:
+        return "20-24"
+
+
+def get_window_num(hour):
+    if 0 <= hour < 4:
+        return 1
+    elif 4 <= hour < 8:
+        return 2
+    elif 8 <= hour < 12:
+        return 3
+    elif 12 <= hour < 16:
+        return 4
+    elif 16 <= hour < 20:
+        return 5
+    else:
+        return 6
+
+
+# -----------------------------
+# 3. LOAD & PROCESS PAIRING DATA
+# -----------------------------
+pairing_df = pd.read_csv(PAIRING_FILE)
+
+# Filters exactly like notebook
+pairing_df = pairing_df[
+    (pairing_df["DutyType"] == "FDUT") &
+    (pairing_df["PairingStatus"] == "Active")
+]
+
+# Convert STD to datetime
+pairing_df["STD"] = pd.to_datetime(pairing_df["STD"], errors="coerce")
+
+# Remove duplicates exactly as notebook
+pairing_df = pairing_df.sort_values("STD")
+pairing_df = pairing_df.drop_duplicates(
+    subset=["ID", "PairingStartDate", "TripCode"],
+    keep="first"
+)
+
+# Date & window
+pairing_df["Date"] = pairing_df["STD"].dt.date
+pairing_df["Hour"] = pairing_df["STD"].dt.hour
+pairing_df["Duty_Window"] = pairing_df["Hour"].apply(get_window)
+pairing_df["Duty_Window_Num"] = pairing_df["Hour"].apply(get_window_num)
+
+# Rank mapping
+pairing_df["Rank"] = pairing_df["Pos"].apply(
+    lambda x: "CP" if "CP" in str(x) else "FO"
+)
+
+# Grouping (exact notebook output)
+pairing_counts = (
+    pairing_df
+    .groupby(["Date", "Station", "Duty_Window", "Duty_Window_Num", "Rank"])
+    .size()
+    .reset_index(name="Pairing_Start_Count")
+)
+
+# -----------------------------
+# 4. LOAD & PROCESS HEADCOUNT
+# -----------------------------
+headcount_df = pd.read_csv(HEADCOUNT_FILE)
+
+# Rank normalization (same as notebook)
+headcount_df["Rank"] = headcount_df["Rank"].apply(
+    lambda x: "CP" if "CP" in str(x) else "FO"
+)
+
+headcount_df = headcount_df[["CREW ID", "Base", "Rank"]].drop_duplicates()
+
+# -----------------------------
+# 5. LOAD & PROCESS STANDBY ACTIVATION DATA
+# -----------------------------
+standby_df = pd.read_csv(STANDBY_FILE)
+
+standby_df["FDUT_time_IST"] = pd.to_datetime(
+    standby_df["FDUT_time_IST"], errors="coerce"
+)
+
+standby_df["Date"] = standby_df["FDUT_time_IST"].dt.date
+standby_df["Hour"] = standby_df["FDUT_time_IST"].dt.hour
+standby_df["Duty_Window"] = standby_df["Hour"].apply(get_window)
+standby_df["Duty_Window_Num"] = standby_df["Hour"].apply(get_window_num)
+
+# Merge to get Station & Rank
+standby_df = standby_df.merge(
+    headcount_df,
+    on="CREW ID",
+    how="left"
+)
+
+standby_df.rename(columns={"Base": "Station"}, inplace=True)
+
+# Group standby activations
+standby_counts = (
+    standby_df
+    .groupby(["Date", "Station", "Duty_Window", "Duty_Window_Num", "Rank"])
+    .size()
+    .reset_index(name="Standby_Activation_Count")
+)
+
+# -----------------------------
+# 6. FINAL MERGE (PAIRING + STANDBY)
+# -----------------------------
+final_df = pairing_counts.merge(
+    standby_counts,
+    on=["Date", "Station", "Duty_Window", "Duty_Window_Num", "Rank"],
+    how="left"
+)
+
+final_df["Standby_Activation_Count"] = final_df[
+    "Standby_Activation_Count"
+].fillna(0).astype(int)
+
+# -----------------------------
+# 7. DATE FILTER (JULY–SEPT)
+# -----------------------------
+final_df["Date"] = pd.to_datetime(final_df["Date"])
+final_df = final_df[
+    (final_df["Date"] >= "2025-07-01") &
+    (final_df["Date"] <= "2025-09-30")
+]
+
+# -----------------------------
+# 8. SORT & EXPORT
+# -----------------------------
+final_df = final_df.sort_values(
+    ["Date", "Station", "Duty_Window_Num", "Rank"]
+)
+
+final_df.to_csv(OUTPUT_FILE, index=False)
+
+print("✅ Final standby conversion CSV generated successfully")
+print("📄 Output file:", OUTPUT_FILE)
